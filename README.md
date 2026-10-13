@@ -3,67 +3,62 @@
 A C compiler frontend written in C++20 that targets the
 [mini-asm](https://github.com/ADevWhoLikesCats/mini-asm) compiler backend.
 
-Currently supports a useful subset of C:
+cfe handles lexing, parsing, semantic analysis, and IR construction.
+Everything from IR onward — optimization, register allocation, code
+emission, assembling, linking — is done by mini-asm.
 
-- `int`-typed functions and parameters
+## Supported C subset
+
+- `int` functions and parameters
 - Local variables (`int x = ...;` and `int x;`)
-- Assignment and re-assignment (SSA with phi insertion for loops)
+- Assignment and re-assignment (with SSA + phi insertion for loops)
 - Arithmetic: `+ - * / %`
 - Comparisons: `== != < <= > >=`
 - `if` / `else`
-- `while` loops (including nested loops)
-- Function calls with up to 16 arguments
+- `while` loops, including nested loops
+- Function calls (up to 16 arguments, per mini-asm's ABI support)
 - `return`
 
-Not yet supported (planned):
+Not yet supported:
 
 - `for` loops
 - Pointers, arrays, structs
 - `char`, `long`, `short`, `float`, `double`
 - Function declarations (only definitions)
 - Globals
-- `void` functions that call other functions
-- `if`-merge phi insertion (currently wrong when a variable is assigned
-  in one branch and read after)
+- Merge-block phi insertion for `if`/`else` (see "Status" below)
 
-## Pipeline
+## Getting mini-asm
 
-    C source
-      → Lexer        (include/lexer.h, src/lexer.cpp)
-      → Parser       (include/parser.h, src/parser.cpp)
-      → AST          (include/ast.h)
-      → CodeGen      (include/codegen.h, src/codegen.cpp)
-      → mini-asm IR  (via libmini-asm's ir_builder.h)
-      → x86_64 asm, ELF binary
+cfe links against a prebuilt `libmini-asm.a`. Build it from the
+mini-asm checkout first:
 
-The frontend owns lexing, parsing, and IR construction. Everything
-from IR onward — optimization, register allocation, code emission,
-assembling, linking — is handled by mini-asm.
-
-## Building
-
-Requires:
-
-- A C++20 compiler (g++ 10+, clang 12+)
-- mini-asm built as a static library (`libmini-asm.a`)
-- GNU `as` and `ld` for the target architecture
-
-Clone and build mini-asm first:
-
-    git clone https://github.com/ADevWhoLikesCats/mini-asm ~/Downloads/cc-backend
-    cd ~/Downloads/cc-backend
+    git clone https://github.com/ADevWhoLikesCats/mini-asm
+    cd mini-asm
     make lib
+    # produces libmini-asm.a in the repo root
 
-Then build cfe:
+Then copy the archive into this repo's `lib/` directory:
 
     mkdir -p lib
-    cp ~/Downloads/cc-backend/libmini-asm.a lib/
-    g++ -std=c++20 \
-        -Iinclude -I$HOME/Downloads/cc-backend/include \
-        src/lexer.cpp src/parser.cpp src/ast_dump.cpp \
-        src/codegen.cpp src/main.cpp \
-        lib/libmini-asm.a \
-        -o cfe
+    cp /path/to/mini-asm/libmini-asm.a lib/
+
+That's a one-time step. `lib/` is where the Makefile looks for the
+archive. The archive is not committed — build it from mini-asm
+yourself, so you always get the version that matches your headers.
+
+## Building cfe
+
+    make
+
+If your mini-asm checkout isn't at `../cc-backend`, point the
+Makefile at it:
+
+    make MINI_ASM_DIR=$HOME/src/mini-asm
+
+The Makefile needs mini-asm's **headers** (for `-I`) and its
+**archive** (for linking). The headers come from `MINI_ASM_DIR`,
+the archive from `lib/`.
 
 ## Usage
 
@@ -71,14 +66,14 @@ Then build cfe:
 
 Options:
 
-- `-S`               — emit assembly to `/tmp/cfe_out.s`, don't assemble
+- `-S`               — emit assembly to `/tmp/cfe_out.s`, stop before assembling
 - `-dump-ast`        — print the parsed AST to stderr
 - `-t <target>`      — select backend target (default `x86_64`)
 
 Examples:
 
     cfe -dump-ast test.c        # see the AST
-    cfe -S test.c               # see the generated .s
+    cfe -S test.c               # see the generated assembly
     cfe test.c                  # compile, link, run; prints exit code
 
 The exit code of the compiled program is printed to stderr and
@@ -106,61 +101,66 @@ returned as cfe's own exit status.
     include/
       token.h       token kinds
       lexer.h       lexer interface
-      ast.h         AST nodes (std::variant-based)
+      ast.h         AST node definitions
       parser.h      parser interface
       codegen.h     codegen interface
     src/
       lexer.cpp
       parser.cpp
-      ast_dump.cpp  AST pretty-printer for debugging
-      codegen.cpp   AST → mini-asm IR
-      main.cpp      driver
+      ast_dump.cpp  AST pretty-printer (for -dump-ast)
+      codegen.cpp   AST -> mini-asm IR
+      main.cpp      CLI driver
 
 ## Design notes
 
-**Lexer.** Hand-written, one-token lookahead. Tokens hold
-`std::string_view` into the source buffer, so lexing is
-allocation-free. Keywords are looked up in a static map.
+**Lexer.** Hand-written, one token of lookahead. Tokens store
+`std::string_view` into the source buffer, so no per-token
+allocation. Keywords live in a static map.
 
-**AST.** `std::variant` of structs rather than a class hierarchy.
-`std::unique_ptr` for children. Visitors use the standard
-`overloaded` trick. This keeps the tree compact and avoids
-virtual dispatch.
+**AST.** A `std::variant` of plain structs rather than a class
+hierarchy with virtual methods. Children are `std::unique_ptr`.
+Visitors use the standard `overloaded` helper. Compact, no
+vtable, and `std::visit` gives exhaustiveness warnings when a
+case is forgotten.
 
-**Codegen.** Direct SSA construction — no alloca/load/store,
-no separate mem2reg pass. Each local variable maps to an SSA
-value in a scope stack. Assignments rebind. Reads look up.
+**Codegen.** Direct SSA construction. Each local variable maps
+to an SSA value tracked in a scope stack; assignment rebinds,
+reads look up. There is no alloca/load/store detour and no
+separate mem2reg pass — codegen emits SSA directly.
 
-For `while` loops, loop-carried variables are identified
-(assigned in the body, declared before the loop) and given
-phi nodes at the loop head. mini-asm's `ir_value_placeholder`
-+ `ir_value_define` API handles the forward references.
+For `while` loops, loop-carried variables (assigned in the body
+and declared before the loop) get phi nodes at the loop head.
+mini-asm's `ir_value_placeholder` + `ir_value_define` API handles
+the forward reference from the head block to the body's
+end-of-loop value.
 
 For `if`/`else`, merge-block phi insertion is not yet
 implemented. Assigning to a variable inside one branch and
-reading it after the `if` gives incorrect results.
+reading it after the `if` will see the pre-`if` value
+(incorrectly), because no phi is emitted at `if.end`.
 
 ## Status
 
-Working:
+Verified working:
 
-- `return <int>;`
-- Arithmetic and comparisons
-- Local variables and assignment
-- `if`/`else` (no merge phis yet)
-- `while` loops with loop-carried variables
-- Nested loops
-- Function calls with parameters
+| test                                         | exit code |
+|----------------------------------------------|-----------|
+| `int main() { return 42; }`                  | 42        |
+| `int add(int a, int b) { return a + b; }`    | —         |
+| `int main() { return add(1, 2) + 10; }`      | 13        |
+| if/else with comparison                      | 20        |
+| while loop summing 0..9                      | 45        |
+| nested while loops                           | 9         |
 
-Tested against:
+Known incorrect: assignments inside an `if` branch that are read
+after the `if`. Will be fixed when merge-block phi insertion lands.
 
-    int main() { return 42; }                          → 42
-    int main() { return 10 + 20 * 3 > 50 ? 1 : 0; }    → (n/a, no ternary)
-    int add(int a, int b) { return a + b; }
-    int main() { return add(1, 2) + 10; }              → 13
-    int main() { ... while (i < 10) sum += i; ... }    → 45
-    int main() { ... nested while ... }                → 9
+## Requirements
+
+- C++20 compiler (g++ 10+ or clang 12+)
+- mini-asm built as `libmini-asm.a` (see above)
+- GNU `as` and `ld` on the target architecture
 
 ## License
 
-Apache 2.0 (matching mini-asm).
+Apache 2.0, matching mini-asm.
