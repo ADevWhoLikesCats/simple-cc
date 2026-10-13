@@ -87,6 +87,7 @@ StmtPtr Parser::parse_stmt() {
     if (check(TokenKind::KwReturn))  return parse_return();
     if (check(TokenKind::KwIf))      return parse_if();
     if (check(TokenKind::KwWhile))   return parse_while();
+    if (check(TokenKind::KwFor))     return parse_for();
     return parse_var_decl_or_expr();
 }
 
@@ -156,6 +157,85 @@ StmtPtr Parser::parse_while() {
 
     s->node = std::move(n);
     return s;
+}
+
+
+StmtPtr Parser::parse_for() {
+    Token kw = expect(TokenKind::KwFor, "'for'");
+    expect(TokenKind::LParen, "'('");
+
+    // init: var decl, expression, or empty
+    StmtPtr init_stmt;
+    if (check(TokenKind::Semi)) {
+        next();
+        init_stmt = nullptr;
+    } else if (check(TokenKind::KwInt) || check(TokenKind::KwChar) ||
+               check(TokenKind::KwLong) || check(TokenKind::KwShort)) {
+        init_stmt = parse_var_decl_or_expr();
+    } else {
+        auto e = parse_expr();
+        expect(TokenKind::Semi, "';'");
+        auto s = std::make_unique<Stmt>();
+        ExprStmt es;
+        es.value = std::move(e);
+        es.line = kw.line; es.col = kw.col;
+        s->node = std::move(es);
+        init_stmt = std::move(s);
+    }
+
+    // cond: expression or empty (empty => always true)
+    ExprPtr cond;
+    if (!check(TokenKind::Semi)) {
+        cond = parse_expr();
+    } else {
+        auto e = std::make_unique<Expr>();
+        IntLitExpr t; t.value = 1; t.line = kw.line; t.col = kw.col;
+        e->node = std::move(t);
+        cond = std::move(e);
+    }
+    expect(TokenKind::Semi, "';'");
+
+    // step: expression or empty
+    ExprPtr step;
+    if (!check(TokenKind::RParen)) {
+        step = parse_expr();
+    }
+    expect(TokenKind::RParen, "')'");
+
+    // body
+    StmtPtr body = parse_stmt();
+
+    // desugar to { init; while (cond) { body; step; } }
+
+    auto while_body = std::make_unique<Stmt>();
+    BlockStmt wb;
+    wb.line = kw.line; wb.col = kw.col;
+    wb.stmts.push_back(std::move(body));
+    if (step) {
+        auto step_stmt = std::make_unique<Stmt>();
+        ExprStmt es;
+        es.value = std::move(step);
+        es.line = kw.line; es.col = kw.col;
+        step_stmt->node = std::move(es);
+        wb.stmts.push_back(std::move(step_stmt));
+    }
+    while_body->node = std::move(wb);
+
+    auto while_stmt = std::make_unique<Stmt>();
+    WhileStmt ws;
+    ws.cond = std::move(cond);
+    ws.body = std::move(while_body);
+    ws.line = kw.line; ws.col = kw.col;
+    while_stmt->node = std::move(ws);
+
+    auto outer = std::make_unique<Stmt>();
+    BlockStmt ob;
+    ob.line = kw.line; ob.col = kw.col;
+    if (init_stmt) ob.stmts.push_back(std::move(init_stmt));
+    ob.stmts.push_back(std::move(while_stmt));
+    outer->node = std::move(ob);
+
+    return outer;
 }
 
 StmtPtr Parser::parse_var_decl_or_expr() {

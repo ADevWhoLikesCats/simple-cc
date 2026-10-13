@@ -74,6 +74,15 @@ void CodeGen::bind(const std::string &name, IRValue *v) {
     scopes_.back()[name] = v;
 }
 
+void CodeGen::rebind(const std::string &name, IRValue *v) {
+    for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
+        auto f = it->find(name);
+        if (f != it->end()) { f->second = v; return; }
+    }
+    if (scopes_.empty()) push_scope();
+    scopes_.back()[name] = v;
+}
+
 IRValue *CodeGen::lookup(const std::string &name) {
     for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
         auto f = it->find(name);
@@ -85,7 +94,8 @@ IRValue *CodeGen::lookup(const std::string &name) {
 // ---------- blocks ----------
 
 IRBlock *CodeGen::new_block(const std::string &prefix) {
-    return ir_builder_block(b_, cur_func_, prefix.c_str());
+    std::string name = prefix + "." + std::to_string(block_counter_++);
+    return ir_builder_block(b_, cur_func_, name.c_str());
 }
 
 void CodeGen::set_block(IRBlock *blk) {
@@ -122,6 +132,7 @@ void CodeGen::emit_function(const FuncDecl &f) {
         ir_builder_params(b_, cur_func_, ptypes.data(), (int)ptypes.size());
     }
 
+    block_counter_ = 0;
     IRBlock *entry = new_block("entry");
     set_block(entry);
 
@@ -269,17 +280,17 @@ void CodeGen::emit_stmt(const Stmt &s) {
                     }
                 }
 
-                bind(v, phi_v);
+                rebind(v, phi_v);
             }
         }
         else if constexpr (std::is_same_v<T, WhileStmt>) {
             IRBlock *pre_loop_blk = cur_block_;
             IRBlock *head = new_block("while.head");
             IRBlock *body = new_block("while.body");
+            IRBlock *back = new_block("while.back");
             IRBlock *exit = new_block("while.exit");
 
-            // Loop-carried variables: assigned inside the body AND declared
-            // before the loop (otherwise they don't escape).
+            // Loop-carried variables.
             std::vector<std::string> assigned;
             for (auto &v : collect_assigned(n.body)) {
                 bool exists = false;
@@ -287,13 +298,13 @@ void CodeGen::emit_stmt(const Stmt &s) {
                 if (exists) assigned.push_back(v);
             }
 
-            // Snapshot pre-loop values
+            // Snapshot pre-loop values.
             std::unordered_map<std::string, IRValue*> pre_loop;
             for (auto &v : assigned) pre_loop[v] = lookup(v);
 
             terminate_br(head);
 
-            // ---- head block: bind to placeholders, emit phis, then condition ----
+            // ---- head: placeholders, phis, condition ----
             set_block(head);
 
             std::unordered_map<std::string, IRValue*> head_use;
@@ -301,38 +312,45 @@ void CodeGen::emit_stmt(const Stmt &s) {
             for (auto &v : assigned) {
                 head_use[v] = ir_value_placeholder(b_, i32_);
                 body_use[v] = ir_value_placeholder(b_, i32_);
-                bind(v, head_use[v]);
+                rebind(v, head_use[v]);
             }
 
+            // Phi's second predecessor is the 'back' block, which always
+            // jumps to head -- regardless of what the body does internally.
             std::unordered_map<std::string, IRValue*> phi_val;
             for (auto &v : assigned) {
                 phi_val[v] = ir_phi(b_, i32_, pre_loop[v], pre_loop_blk,
-                                    body_use[v], body);
+                                    body_use[v], back);
             }
 
             IRValue *cond = emit_expr(*n.cond);
             ir_cbr(b_, cond, body, exit);
             terminated_ = true;
 
-            // ---- body block ----
+            // ---- body ----
             set_block(body);
             emit_stmt(*n.body);
 
-            // Capture post-body values (the current SSA value of each var)
             std::unordered_map<std::string, IRValue*> post_body;
             for (auto &v : assigned) post_body[v] = lookup(v);
 
-            if (!terminated_) terminate_br(head);
+            // Body flows into 'back'.
+            if (!terminated_) terminate_br(back);
 
-            // Backfill: body->head edge, and the placeholder used by the phi
+            // 'back' unconditionally jumps to 'head' -- the edge the phi's
+            // second input corresponds to.
+            set_block(back);
+            terminate_br(head);
+
+            // Backfill phis.
             for (auto &v : assigned) {
                 ir_value_define(b_, body_use[v], post_body[v]);
                 ir_value_define(b_, head_use[v], phi_val[v]);
             }
 
-            // After the loop, each loop-carried var takes the phi value
+            // After the loop, loop-carried vars take the phi value.
             set_block(exit);
-            for (auto &v : assigned) bind(v, phi_val[v]);
+            for (auto &v : assigned) rebind(v, phi_val[v]);
         }
         else {
             // shouldn't happen — all cases covered above

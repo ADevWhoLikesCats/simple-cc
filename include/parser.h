@@ -35,6 +35,7 @@ private:
     StmtPtr parse_return();
     StmtPtr parse_if();
     StmtPtr parse_while();
+    StmtPtr parse_for();
     StmtPtr parse_var_decl_or_expr();
 
     ExprPtr parse_expr();

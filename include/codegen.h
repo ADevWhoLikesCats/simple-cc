@@ -33,6 +33,7 @@ private:
     // current function
     IRFunc  *cur_func_  = nullptr;
     IRBlock *cur_block_ = nullptr;
+    uint32_t block_counter_ = 0;
     bool     terminated_ = false;
 
     // scopes: name -> current SSA value
@@ -43,6 +44,7 @@ private:
     void push_scope();
     void pop_scope();
     void bind(const std::string &name, IRValue *v);
+    void rebind(const std::string &name, IRValue *v);
     IRValue *lookup(const std::string &name);
 
     void emit_function(const FuncDecl &f);
