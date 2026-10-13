@@ -1,0 +1,19 @@
+# build artifacts
+*.o
+*.a
+*.s
+*.out
+cfe
+cfe-demo
+lexer-demo
+
+# editor/OS cruft
+*.swp
+*~
+.DS_Store
+.vscode/
+.idea/
+
+# temp test files
+/tmp-test/
+build/
