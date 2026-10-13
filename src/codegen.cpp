@@ -170,6 +170,28 @@ void CodeGen::emit_stmt(const Stmt &s) {
             pop_scope();
         }
         else if constexpr (std::is_same_v<T, IfStmt>) {
+            IRBlock *pre_if_blk = cur_block_;
+
+            // Collect variables assigned in either branch AND declared
+            // before the if. These need merge phis.
+            std::vector<std::string> assigned;
+            {
+                std::vector<std::string> cand;
+                for (auto &v : collect_assigned(n.then_)) cand.push_back(v);
+                if (n.else_) for (auto &v : collect_assigned(n.else_)) cand.push_back(v);
+                std::sort(cand.begin(), cand.end());
+                cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
+                for (auto &v : cand) {
+                    bool exists = false;
+                    for (auto &sc : scopes_) if (sc.count(v)) { exists = true; break; }
+                    if (exists) assigned.push_back(v);
+                }
+            }
+
+            // Snapshot pre-if values
+            std::unordered_map<std::string, IRValue*> pre_if;
+            for (auto &v : assigned) pre_if[v] = lookup(v);
+
             IRValue *cond = emit_expr(*n.cond);
 
             IRBlock *then_blk  = new_block("if.then");
@@ -180,23 +202,75 @@ void CodeGen::emit_stmt(const Stmt &s) {
             else          ir_cbr(b_, cond, then_blk, merge_blk);
             terminated_ = true;
 
-            // then
+            // ---- then branch ----
             set_block(then_blk);
-            push_scope();
             emit_stmt(*n.then_);
-            pop_scope();
-            if (!terminated_) terminate_br(merge_blk);
+            bool then_terminated = terminated_;
+            std::unordered_map<std::string, IRValue*> post_then;
+            for (auto &v : assigned) post_then[v] = lookup(v);
+            if (!then_terminated) terminate_br(merge_blk);
 
-            // else
+            // ---- else branch ----
+            std::unordered_map<std::string, IRValue*> post_else;
+            bool else_terminated = false;
             if (else_blk) {
                 set_block(else_blk);
-                push_scope();
                 emit_stmt(*n.else_);
-                pop_scope();
-                if (!terminated_) terminate_br(merge_blk);
+                else_terminated = terminated_;
+                for (auto &v : assigned) post_else[v] = lookup(v);
+                if (!else_terminated) terminate_br(merge_blk);
             }
 
+            // ---- merge block with phis ----
             set_block(merge_blk);
+
+            // If both branches terminated, merge is unreachable.
+            if (then_terminated && (else_blk ? else_terminated : true) && !else_blk) {
+                // then returns, no else: merge is reachable from pre_if only.
+                // Fall through to the merge logic below (which handles it).
+            }
+
+            // Reject the mixed case for now: one branch returns, the other
+            // doesn't reach merge.
+            bool then_reaches  = !then_terminated;
+            bool else_reaches  = else_blk ? !else_terminated : true;  // no else means pre_if reaches
+            // (Actually for no-else case, "else reaches" = pre_if reaches)
+
+            if (then_reaches && !else_reaches && else_blk) {
+                throw CodeGenError("if: one branch returns, the other doesn't — merge phis not yet handled for this case");
+            }
+
+            // Build the phi for each assigned variable.
+            for (auto &v : assigned) {
+                IRValue *phi_v = nullptr;
+
+                if (else_blk) {
+                    // Two predecessors: then and else.
+                    if (then_reaches && else_reaches) {
+                        phi_v = ir_phi(b_, i32_, post_then[v], then_blk,
+                                              post_else[v], else_blk);
+                    } else if (then_reaches) {
+                        // else returns; only then reaches.
+                        phi_v = post_then[v];   // no phi needed
+                    } else if (else_reaches) {
+                        phi_v = post_else[v];
+                    } else {
+                        // Both return. Merge unreachable; value doesn't matter.
+                        phi_v = pre_if[v];
+                    }
+                } else {
+                    // No else: predecessors are then and pre_if.
+                    if (then_reaches) {
+                        phi_v = ir_phi(b_, i32_, post_then[v], then_blk,
+                                              pre_if[v],    pre_if_blk);
+                    } else {
+                        // then returns; only pre_if reaches.
+                        phi_v = pre_if[v];
+                    }
+                }
+
+                bind(v, phi_v);
+            }
         }
         else if constexpr (std::is_same_v<T, WhileStmt>) {
             IRBlock *pre_loop_blk = cur_block_;

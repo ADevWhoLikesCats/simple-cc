@@ -199,72 +199,27 @@ ExprPtr Parser::parse_expr() {
 }
 
 ExprPtr Parser::parse_assignment() {
-    // Peek: ident followed by '=' -> assignment. Otherwise binary chain.
-    if (check(TokenKind::Ident)) {
-        Token id = next();
-        if (accept(TokenKind::Assign)) {
-            auto e = std::make_unique<Expr>();
-            AssignExpr a;
-            a.name  = std::string(id.text);
-            a.line  = id.line;
-            a.col   = id.col;
-            a.value = parse_assignment();
-            e->node = std::move(a);
-            return e;
-        }
-        // Not an assignment: build the primary (Var or Call) and continue
-        // the binary chain from the equality level.
-        ExprPtr primary;
-        if (check(TokenKind::LParen)) {
-            next();
-            auto e = std::make_unique<Expr>();
-            CallExpr c;
-            c.callee = std::string(id.text);
-            c.line   = id.line;
-            c.col    = id.col;
-            if (!check(TokenKind::RParen)) {
-                for (;;) {
-                    c.args.push_back(parse_expr());
-                    if (!accept(TokenKind::Comma)) break;
-                }
-            }
-            expect(TokenKind::RParen, "')'");
-            e->node = std::move(c);
-            primary = std::move(e);
-        } else {
-            auto e = std::make_unique<Expr>();
-            VarExpr v;
-            v.name = std::string(id.text);
-            v.line = id.line;
-            v.col  = id.col;
-            e->node = std::move(v);
-            primary = std::move(e);
-        }
-        // Continue the binary chain using `primary` as the LHS at every level.
-        // We simulate by parsing the rest at the equality level, then folding
-        // left-associatively.
-        // Simpler: continue with parse_equality_rest(primary).
-        return parse_binary_rest(std::move(primary));
-    }
-    return parse_equality();
-}
+    auto lhs = parse_equality();
 
-// helper declared in header: continue a binary chain with a given LHS
-ExprPtr Parser::parse_binary_rest(ExprPtr lhs) {
-    auto loop = [&](auto &&next_level, auto pred) -> void {
-        while (pred()) {
-            Token op = next();
-            auto rhs = next_level();
-            lhs = make_binary(op.kind, std::move(lhs), std::move(rhs),
-                              expr_line(lhs), expr_col(lhs));
+    if (check(TokenKind::Assign)) {
+        Token eq = next();
+        auto *v = std::get_if<VarExpr>(&lhs->node);
+        if (!v) {
+            std::ostringstream os;
+            os << "left side of '=' must be a variable";
+            throw ParseError(os.str(), eq.line, eq.col);
         }
-    };
-    loop([&]{ return parse_equality(); },  [&]{ return check(TokenKind::Eq) || check(TokenKind::Ne); });
-    loop([&]{ return parse_relational(); }, [&]{ return check(TokenKind::Lt) || check(TokenKind::Le) ||
-                                                       check(TokenKind::Gt) || check(TokenKind::Ge); });
-    loop([&]{ return parse_additive(); },  [&]{ return check(TokenKind::Plus) || check(TokenKind::Minus); });
-    loop([&]{ return parse_multiplicative(); }, [&]{ return check(TokenKind::Star) || check(TokenKind::Slash) ||
-                                                       check(TokenKind::Percent); });
+        auto rhs = parse_assignment();   // right-associative
+        auto e = std::make_unique<Expr>();
+        AssignExpr a;
+        a.name  = v->name;
+        a.line  = expr_line(lhs);
+        a.col   = expr_col(lhs);
+        a.value = std::move(rhs);
+        e->node = std::move(a);
+        return e;
+    }
+
     return lhs;
 }
 

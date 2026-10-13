@@ -1,19 +1,25 @@
-# build artifacts
-*.o
-*.a
-*.s
-*.out
+# build outputs
 cfe
 cfe-demo
 lexer-demo
+*.o
+*.out
 
-# editor/OS cruft
+# prebuilt mini-asm archive — users build this themselves
+lib/*.a
+
+# generated assembly
+*.s
+
+# editor / OS cruft
 *.swp
+*.swo
 *~
 .DS_Store
 .vscode/
 .idea/
+*.kate-swp
 
-# temp test files
+# temp test artifacts
 /tmp-test/
 build/

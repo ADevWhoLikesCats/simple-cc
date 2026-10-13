@@ -39,7 +39,6 @@ private:
 
     ExprPtr parse_expr();
     ExprPtr parse_assignment();
-    ExprPtr parse_binary_rest(ExprPtr lhs);
     ExprPtr parse_equality();
     ExprPtr parse_relational();
     ExprPtr parse_additive();
