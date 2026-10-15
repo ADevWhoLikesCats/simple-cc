@@ -281,26 +281,59 @@ ExprPtr Parser::parse_expr() {
 ExprPtr Parser::parse_assignment() {
     auto lhs = parse_equality();
 
-    if (check(TokenKind::Assign)) {
-        Token eq = next();
-        auto *v = std::get_if<VarExpr>(&lhs->node);
-        if (!v) {
-            std::ostringstream os;
-            os << "left side of '=' must be a variable";
-            throw ParseError(os.str(), eq.line, eq.col);
-        }
-        auto rhs = parse_assignment();   // right-associative
-        auto e = std::make_unique<Expr>();
-        AssignExpr a;
-        a.name  = v->name;
-        a.line  = expr_line(lhs);
-        a.col   = expr_col(lhs);
-        a.value = std::move(rhs);
-        e->node = std::move(a);
-        return e;
+    TokenKind assign_op = peek().kind;
+    TokenKind bin_op = TokenKind::Invalid;
+    switch (assign_op) {
+        case TokenKind::Assign:    bin_op = TokenKind::Invalid;  break;
+        case TokenKind::PlusEq:    bin_op = TokenKind::Plus;     break;
+        case TokenKind::MinusEq:   bin_op = TokenKind::Minus;    break;
+        case TokenKind::StarEq:    bin_op = TokenKind::Star;     break;
+        case TokenKind::SlashEq:   bin_op = TokenKind::Slash;    break;
+        case TokenKind::PercentEq: bin_op = TokenKind::Percent;  break;
+        default: return lhs;
     }
 
-    return lhs;
+    Token eq = next();
+
+    auto *v = std::get_if<VarExpr>(&lhs->node);
+    if (!v) {
+        std::ostringstream os;
+        os << "left side of assignment must be a variable";
+        throw ParseError(os.str(), eq.line, eq.col);
+    }
+
+    auto rhs = parse_assignment();
+
+    ExprPtr value;
+    if (bin_op == TokenKind::Invalid) {
+        value = std::move(rhs);
+    } else {
+        auto var_copy = std::make_unique<Expr>();
+        VarExpr vc;
+        vc.name = v->name;
+        vc.line = expr_line(lhs);
+        vc.col  = expr_col(lhs);
+        var_copy->node = std::move(vc);
+
+        auto bin = std::make_unique<Expr>();
+        BinaryExpr b;
+        b.op   = bin_op;
+        b.lhs  = std::move(var_copy);
+        b.rhs  = std::move(rhs);
+        b.line = expr_line(lhs);
+        b.col  = expr_col(lhs);
+        bin->node = std::move(b);
+        value = std::move(bin);
+    }
+
+    auto e = std::make_unique<Expr>();
+    AssignExpr a;
+    a.name  = v->name;
+    a.line  = expr_line(lhs);
+    a.col   = expr_col(lhs);
+    a.value = std::move(value);
+    e->node = std::move(a);
+    return e;
 }
 
 ExprPtr Parser::parse_equality() {
